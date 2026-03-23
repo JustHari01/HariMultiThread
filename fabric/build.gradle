@@ -1,0 +1,75 @@
+plugins {
+    id 'multiloader-loader'
+    id 'fabric-loom' version '1.9-SNAPSHOT'
+    id 'java-library'
+    id 'idea'
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+loom {
+    // 1. Access Widener & Mixin Config
+    def aw = project(':common').file("src/main/resources/async.accesswidener")
+    if (aw.exists()) {
+        accessWidenerPath = aw
+    }
+
+    mixin {
+        defaultRefmapName = "async.refmap.json"
+        useLegacyMixinAp = true
+    }
+
+    // 2. Run Configurations
+    runs {
+        client {
+            client()
+            setConfigName('Fabric Client')
+            ideConfigGenerated(true)
+            runDir('runs/client')
+        }
+        server {
+            server()
+            setConfigName('Fabric Server')
+            ideConfigGenerated(true)
+            runDir('runs/server')
+        }
+    }
+}
+
+repositories {
+    maven { name = 'Modrinth'; url = 'https://api.modrinth.com/maven' }
+    maven { name = 'Bawnorton'; url = 'https://maven.bawnorton.com/releases' }
+    mavenCentral()
+}
+
+dependencies {
+    // 1. Core Minecraft & Mappings
+    minecraft "com.mojang:minecraft:${minecraft_version}"
+    mappings loom.layered {
+        officialMojangMappings()
+        parchment("org.parchmentmc.data:parchment-${parchment_minecraft}:${parchment_version}@zip")
+    }
+
+    // 2. Loader & API
+    modImplementation "net.fabricmc:fabric-loader:${fabric_loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_version}"
+
+    // 3. Mixin Stack & Dependencies
+    // MixinSquared
+    // include(implementation(annotationProcessor("com.github.bawnorton.mixinsquared:mixinsquared-fabric:0.1.1")))
+
+    // NightConfig (Used for TOML support on Fabric)
+    include(modImplementation('com.electronwill.night-config:toml:3.8.1'))
+    include('com.electronwill.night-config:core:3.8.1')
+
+    // Permissions API -> REMOVED because lucko builds this on a Loom 1.14 plugin that crashes gradle 8.x
+    // modImplementation(include("me.lucko:fabric-permissions-api:${permission_api}")) {
+    //    exclude group: "net.fabricmc.fabric-api"
+    // }
+
+    // 4. Utilities (Lombok)
+    compileOnly 'org.projectlombok:lombok:1.18.32'
+    annotationProcessor 'org.projectlombok:lombok:1.18.32'
+}
+
+layout.buildDirectory.set(file("C:/tmp/AsyncBuild/fabric"))

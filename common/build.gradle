@@ -1,0 +1,58 @@
+plugins {
+    id 'idea'
+    id 'java'
+    id 'net.minecraftforge.gradle'
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(java_version)
+
+minecraft {
+    mappings channel: 'official', version: minecraft_version
+
+    accessTransformer = file('src/main/resources/META-INF/accesstransformer.cfg')
+}
+
+repositories {
+    maven { name = 'Bawnorton'; url = 'https://maven.bawnorton.com/releases' }
+    mavenCentral()
+    mavenLocal()
+}
+
+dependencies {
+    // 1. Core Minecraft/Forge
+    minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
+
+    // 2. Mixin Stack (Extras + Squared)
+    implementation(annotationProcessor("io.github.llamalad7:mixinextras-common:${mixinextras_version}"))
+    // compileOnly(annotationProcessor("com.github.bawnorton.mixinsquared:mixinsquared-common:0.1.1"))
+    // compileOnly("com.github.bawnorton.mixinsquared:mixinsquared-common:0.1.1")
+
+    // 3. ASM (Required for low-level byte manipulation)
+    implementation "org.ow2.asm:asm:9.5"
+    implementation "org.ow2.asm:asm-tree:9.5"
+
+    // 4. Utilities (Lombok)
+    compileOnly 'org.projectlombok:lombok:1.18.32'
+    annotationProcessor 'org.projectlombok:lombok:1.18.32'
+}
+
+// Configuration for sharing source/resources with loader-specific projects
+configurations {
+    commonJava {
+        canBeResolved = false
+        canBeConsumed = true
+    }
+    commonResources {
+        canBeResolved = false
+        canBeConsumed = true
+    }
+}
+
+artifacts {
+    commonJava sourceSets.main.java.sourceDirectories.singleFile
+    commonResources sourceSets.main.resources.sourceDirectories.singleFile
+}
+
+idea.module { downloadJavadoc = downloadSources = true }
+
+layout.buildDirectory.set(file("C:/tmp/AsyncBuild/common"))
