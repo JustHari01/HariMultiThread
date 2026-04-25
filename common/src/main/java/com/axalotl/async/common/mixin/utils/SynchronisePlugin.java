@@ -1,5 +1,6 @@
 package com.axalotl.async.common.mixin.utils;
 
+import com.axalotl.async.common.AsyncCommon;
 import com.axalotl.async.common.platform.PlatformUtils;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.Multimap;
@@ -37,6 +38,12 @@ public class SynchronisePlugin implements IMixinConfigPlugin {
 
     @Override
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
+        if (mixinClassName.endsWith(".lithium.RadiumServerLevel")) {
+            return AsyncCommon.LITHIUM;
+        }
+        if (mixinClassName.endsWith(".vmp.VMPChunkMapMixin")) {
+            return AsyncCommon.HARIPLAYER;
+        }
         return true;
     }
 
@@ -63,6 +70,19 @@ public class SynchronisePlugin implements IMixinConfigPlugin {
         } else if (syncAllSet.contains(mixinClassName)) {
             for (MethodNode method : targetClass.methods) {
                 if ((method.access & FINAL_STATIC_PRIVATE_ABSTRACT) == 0 && !method.name.equals("<init>") && !excludedMethods.contains(method.name)) {
+                    // When HariChunk/C2ME is loaded, skip adding synchronized to DynamicGraphMinFixedPoint
+                    // because C2ME has its own lighting thread management that handles concurrency
+                    if (AsyncCommon.HARICHUNK && targetClassName.contains("DynamicGraphMinFixedPoint")) {
+                        LOGGER.debug("Skipping synchronized for {} in {} - C2ME manages lighting threads", method.name, targetClassName);
+                        continue;
+                    }
+                    // When Harium is loaded, skip adding synchronized to PalettedContainer's lock/unlock
+                    // because Harium already overwrites these to no-op
+                    if (AsyncCommon.LITHIUM && targetClassName.contains("PalettedContainer")
+                            && (method.name.equals("lock") || method.name.equals("unlock"))) {
+                        LOGGER.debug("Skipping synchronized for {} in {} - Harium already handles locking", method.name, targetClassName);
+                        continue;
+                    }
                     method.access |= SYNCHRONIZED;
                     logSynchronize(method.name, targetClassName, mixinClassName);
                 }

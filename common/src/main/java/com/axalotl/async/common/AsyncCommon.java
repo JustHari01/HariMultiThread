@@ -27,12 +27,21 @@ public abstract class AsyncCommon {
         LOGGER.info("=== HariMultiThread Mod Compatibility ===");
         if (LITHIUM) {
             LOGGER.info("Detected: Harium/Lithium - Adjusted entity AI optimizations");
+            LOGGER.info("  -> Enabled RadiumServerLevel compat mixin");
+            LOGGER.info("  -> SyncAllMixin will provide thread safety for optimized collections");
         }
         if (HARIPLAYER) {
             LOGGER.info("Detected: HariPlayer/VMP - Async chunk operations coordinated");
+            LOGGER.info("  -> Enabled VMPChunkMapMixin compat mixin");
+            LOGGER.info("  -> Entity tracking synchronized with VMP optimizations");
         }
         if (HARICHUNK) {
             LOGGER.info("Detected: HariChunk/C2ME - Threading synchronized");
+            LOGGER.info("  -> Chunk operations deferred to C2ME async system");
+            LOGGER.info("  -> DynamicGraphMinFixedPoint excluded from SyncAll (C2ME manages lighting threads)");
+        }
+        if (LITHIUM && HARIPLAYER) {
+            LOGGER.info("Detected: Harium + HariPlayer together - PalettedContainer lock removal handled by Harium");
         }
         if (!(LITHIUM || HARIPLAYER || HARICHUNK)) {
             LOGGER.info("No conflicting optimization mods detected - Full async mode enabled");

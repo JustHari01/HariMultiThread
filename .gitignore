@@ -16,3 +16,6 @@
 /common/out/
 /common/run/
 /common/.gradle/
+
+# Allow libs
+!common/libs/*.jar

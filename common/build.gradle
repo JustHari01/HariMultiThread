@@ -34,6 +34,9 @@ dependencies {
     // 4. Utilities (Lombok)
     compileOnly 'org.projectlombok:lombok:1.18.32'
     annotationProcessor 'org.projectlombok:lombok:1.18.32'
+
+    // 5. Optional: Harium for navigation integration
+    compileOnly files("libs/Harium-1.0.0.jar")
 }
 
 // Configuration for sharing source/resources with loader-specific projects
@@ -55,4 +58,4 @@ artifacts {
 
 idea.module { downloadJavadoc = downloadSources = true }
 
-layout.buildDirectory.set(file("C:/tmp/AsyncBuild/common"))
+layout.buildDirectory.set(file("build"))

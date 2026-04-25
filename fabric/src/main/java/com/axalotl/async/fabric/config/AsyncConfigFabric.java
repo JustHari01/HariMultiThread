@@ -43,48 +43,69 @@ public class AsyncConfigFabric {
     }
 
     public static void saveConfig() {
-        CONFIG.set("disabled", disabled);
+        CONFIG.set("disabled", disabled.getValue());
         CONFIG.setComment("disabled",
                 "Globally disable all toggleable functionality within the async system. Set to true to stop all asynchronous operations.");
 
-        CONFIG.set("paraMax", maxThreads);
+        CONFIG.set("paraMax", maxThreads.getValue());
         CONFIG.setComment("paraMax",
                 "Maximum number of threads to use for parallel processing. Set to -1 to use default value. Note: If 'virtualThreads' is enabled, this setting will be ignored.");
 
-        CONFIG.set("synchronizedEntities", new ArrayList<>(synchronizedEntities));
+        CONFIG.set("synchronizedEntities", new ArrayList<>(synchronizedEntities.getValue()));
         CONFIG.setComment("synchronizedEntities", "List of entity class for sync processing.");
 
-        CONFIG.set("enableAsyncSpawn", enableAsyncSpawn);
+        CONFIG.set("enableAsyncSpawn", enableAsyncSpawn.getValue());
         CONFIG.setComment("enableAsyncSpawn",
                 "Enables parallel processing of entity spawns. Warning, incompatible with Carpet mod lagFreeSpawning rule.");
 
-        CONFIG.set("enableAsyncRandomTicks", enableAsyncRandomTicks);
+        CONFIG.set("enableAsyncRandomTicks", enableAsyncRandomTicks.getValue());
         CONFIG.setComment("enableAsyncRandomTicks",
                 "Experimental! Enables async random ticks.");
 
         CONFIG.save();
+        onConfigLoaded();
         LOGGER.info("Configuration saved successfully.");
     }
 
+    public static void loadConfig() {
+        if (CONFIG == null) {
+            init();
+            return;
+        }
+        try {
+            CONFIG.load();
+            loadConfigValues();
+            LOGGER.info("Configuration reloaded successfully.");
+        } catch (Throwable t) {
+            LOGGER.error("Error reloading configuration, resetting to default values.", t);
+            setDefaultValues();
+            saveConfig();
+        }
+    }
+
     private static void loadConfigValues() {
+        disabled.setValue(CONFIG.getOrElse("disabled", disabled.getValue()));
+        maxThreads.setValue(CONFIG.getOrElse("paraMax", maxThreads.getValue()));
+        enableAsyncSpawn.setValue(CONFIG.getOrElse("enableAsyncSpawn", enableAsyncSpawn.getValue()));
+        enableAsyncRandomTicks.setValue(CONFIG.getOrElse("enableAsyncRandomTicks", enableAsyncRandomTicks.getValue()));
+
+        Set<String> entities = new HashSet<>();
+        CONFIG.<List<String>>getOptional("synchronizedEntities").ifPresentOrElse(ids -> {
+            for (String id : ids) {
+                entities.add(id);
+            }
+        }, () -> entities.addAll(getDefaultSynchronizedEntities()));
+
+        synchronizedEntities.setValue(entities.isEmpty()
+                ? getDefaultSynchronizedEntities()
+                : entities);
+
         Set<String> processedKeys = new HashSet<>(List.of(
                 "disabled",
                 "paraMax",
                 "synchronizedEntities",
                 "enableAsyncSpawn",
                 "enableAsyncRandomTicks"));
-
-        disabled = CONFIG.getOrElse("disabled", disabled);
-        maxThreads = CONFIG.getOrElse("paraMax", maxThreads);
-        enableAsyncSpawn = CONFIG.getOrElse("enableAsyncSpawn", enableAsyncSpawn);
-        enableAsyncRandomTicks = CONFIG.getOrElse("enableAsyncRandomTicks", enableAsyncRandomTicks);
-
-        synchronizedEntities = new HashSet<>();
-        CONFIG.<List<String>>getOptional("synchronizedEntities").ifPresentOrElse(ids -> {
-            for (String id : ids) {
-                synchronizedEntities.add(id);
-            }
-        }, () -> synchronizedEntities = getDefaultSynchronizedEntities());
 
         Set<String> keysToRemove = new HashSet<>();
         for (CommentedConfig.Entry entry : CONFIG.entrySet()) {
@@ -100,13 +121,14 @@ public class AsyncConfigFabric {
         }
 
         CONFIG.save();
+        onConfigLoaded();
     }
 
     private static void setDefaultValues() {
-        disabled = false;
-        maxThreads = -1;
-        enableAsyncSpawn = false;
-        enableAsyncRandomTicks = false;
-        synchronizedEntities = getDefaultSynchronizedEntities();
+        disabled.setValue(false);
+        maxThreads.setValue(-1);
+        enableAsyncSpawn.setValue(false);
+        enableAsyncRandomTicks.setValue(false);
+        synchronizedEntities.setValue(getDefaultSynchronizedEntities());
     }
 }

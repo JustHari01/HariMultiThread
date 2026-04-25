@@ -40,6 +40,7 @@ repositories {
     maven { name = 'Modrinth'; url = 'https://api.modrinth.com/maven' }
     maven { name = 'Bawnorton'; url = 'https://maven.bawnorton.com/releases' }
     mavenCentral()
+    mavenLocal()
 }
 
 dependencies {
@@ -70,6 +71,9 @@ dependencies {
     // 4. Utilities (Lombok)
     compileOnly 'org.projectlombok:lombok:1.18.32'
     annotationProcessor 'org.projectlombok:lombok:1.18.32'
+
+    // 5. Optional: Harium for navigation integration
+    compileOnly files("../common/libs/Harium-1.0.0.jar")
 }
 
-layout.buildDirectory.set(file("C:/tmp/AsyncBuild/fabric"))
+layout.buildDirectory.set(file("build"))

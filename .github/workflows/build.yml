@@ -41,8 +41,8 @@ jobs:
       - name: Prepare artifact directory
         run: |
           mkdir jars
-          cp neoforge/build/libs/*.jar jars/
-          cp fabric/build/libs/*.jar jars/
+          cp forge/build/libs/*.jar jars/ || true
+          cp fabric/build/libs/*.jar jars/ || true
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
