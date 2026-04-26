@@ -17,5 +17,10 @@
 /common/run/
 /common/.gradle/
 
+/buildSrc/.gradle/
+/buildSrc/build/
+
+**/bin/
+
 # Allow libs
 !common/libs/*.jar

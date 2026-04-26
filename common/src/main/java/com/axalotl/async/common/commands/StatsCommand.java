@@ -3,6 +3,7 @@ package com.axalotl.async.common.commands;
 import com.axalotl.async.common.ParallelProcessor;
 import com.axalotl.async.common.config.AsyncConfig;
 import com.axalotl.async.common.platform.Permission;
+import com.axalotl.async.common.utils.EntityTickCircuitBreaker;
 import com.axalotl.async.common.utils.TickStats;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
@@ -92,6 +93,14 @@ public class StatsCommand {
         boolean asyncSpawn = AsyncConfig.enableAsyncSpawn.getValue();
         boolean asyncRandomTicks = AsyncConfig.enableAsyncRandomTicks.getValue();
 
+        boolean affinityRouting = AsyncConfig.enableAffinityRouting.getValue();
+        boolean circuitBreakerEnabled = AsyncConfig.enableCircuitBreaker.getValue();
+        int workers = ParallelProcessor.getLastWorkerCount();
+        int openCircuits = ParallelProcessor.getCircuitBreaker().getOpenCircuitCount();
+        int trackedTypes = ParallelProcessor.getCircuitBreaker().getTrackedTypeCount();
+        int asyncFailures = ParallelProcessor.getTotalAsyncFailures();
+        int timeoutWarnings = ParallelProcessor.getTotalTimeoutWarnings();
+
         MutableComponent message = AsyncCommand.prefix.copy()
                 .append(Component.literal("Performance Statistics").withStyle(ChatFormatting.GOLD))
                 .append(Component.literal("\nStatus: ").withStyle(ChatFormatting.WHITE))
@@ -103,6 +112,12 @@ public class StatsCommand {
                 .append(Component.literal("\nAsync Random Ticks: ").withStyle(ChatFormatting.WHITE))
                 .append(Component.literal(asyncRandomTicks ? "Enabled" : "Disabled")
                         .withStyle(asyncRandomTicks ? ChatFormatting.GREEN : ChatFormatting.RED))
+                .append(Component.literal("\nAffinity Routing: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(affinityRouting ? "Enabled" : "Disabled")
+                        .withStyle(affinityRouting ? ChatFormatting.GREEN : ChatFormatting.RED))
+                .append(Component.literal("\nCircuit Breaker: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(circuitBreakerEnabled ? "Enabled" : "Disabled")
+                        .withStyle(circuitBreakerEnabled ? ChatFormatting.GREEN : ChatFormatting.RED))
                 .append(Component.literal("\nMSPT: ").withStyle(ChatFormatting.WHITE))
                 .append(Component.literal(DECIMAL_FORMAT.format(mspt) + "ms")
                         .withStyle(getMsptColor(mspt)))
@@ -111,8 +126,29 @@ public class StatsCommand {
                 .append(Component.literal(" (").withStyle(ChatFormatting.GRAY))
                 .append(Component.literal(DECIMAL_FORMAT.format(asyncRatio) + "%").withStyle(ChatFormatting.AQUA))
                 .append(Component.literal(" async)").withStyle(ChatFormatting.GRAY))
-                .append(Component.literal("\nThreads: ").withStyle(ChatFormatting.WHITE))
-                .append(Component.literal(String.valueOf(threads)).withStyle(ChatFormatting.YELLOW));
+                .append(Component.literal("\nPool Threads: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(String.valueOf(threads)).withStyle(ChatFormatting.YELLOW))
+                .append(Component.literal(" | Active Workers: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(String.valueOf(workers)).withStyle(ChatFormatting.YELLOW));
+
+        if (circuitBreakerEnabled) {
+            message.append(Component.literal("\nCircuit Breaker: ").withStyle(ChatFormatting.WHITE))
+                    .append(Component.literal(openCircuits + " open").withStyle(
+                            openCircuits > 0 ? ChatFormatting.RED : ChatFormatting.GREEN))
+                    .append(Component.literal(" / " + trackedTypes + " tracked").withStyle(ChatFormatting.GRAY));
+        }
+
+        if (asyncFailures > 0) {
+            message.append(Component.literal("\nAsync Failures: ").withStyle(ChatFormatting.WHITE))
+                    .append(Component.literal(String.valueOf(asyncFailures))
+                            .withStyle(ChatFormatting.RED));
+        }
+
+        if (timeoutWarnings > 0) {
+            message.append(Component.literal("\nTimeout Warnings: ").withStyle(ChatFormatting.WHITE))
+                    .append(Component.literal(String.valueOf(timeoutWarnings))
+                            .withStyle(ChatFormatting.YELLOW));
+        }
 
         source.sendSuccess(() -> message, false);
     }

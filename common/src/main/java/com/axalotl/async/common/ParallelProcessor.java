@@ -3,14 +3,17 @@ package com.axalotl.async.common;
 import com.axalotl.async.common.config.AsyncConfig;
 import com.axalotl.async.common.mixin.accessor.EntityAccessor;
 import com.axalotl.async.common.parallelised.utils.AsyncCompatible;
+import com.axalotl.async.common.utils.EntityTickCircuitBreaker;
 import com.axalotl.async.common.utils.TickStats;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -44,12 +47,44 @@ public class ParallelProcessor {
     private static final Set<UUID> blacklistedEntity = ConcurrentHashMap.newKeySet();
     private static final Map<String, Set<WeakReference<Thread>>> mcThreadTracker = new ConcurrentHashMap<>();
     private static volatile boolean isShuttingDown = false;
-    private static final Object ENTITY_ADD_LOCK = new Object();
+
+    // --- NEW: Circuit breaker for per-entity-type crash isolation ---
+    private static final EntityTickCircuitBreaker circuitBreaker = new EntityTickCircuitBreaker();
+
+    // --- NEW: Telemetry counters ---
+    private static final LongAdder totalAsyncTicks = new LongAdder();
+    private static final LongAdder totalAsyncFailures = new LongAdder();
+    private static final LongAdder totalTimeoutWarnings = new LongAdder();
+    private static final AtomicInteger lastWorkerCount = new AtomicInteger(0);
+
+    // --- REMOVED: global ENTITY_ADD_LOCK (now per-dimension in ServerLevelMixin) ---
+
     public static final Set<Class<?>> BLOCKED_ENTITIES = Set.of(
             FallingBlockEntity.class,
             Shulker.class,
             Boat.class);
+
     private static final Map<UUID, Integer> portalTickSyncMap = new ConcurrentHashMap<>();
+
+    public static EntityTickCircuitBreaker getCircuitBreaker() {
+        return circuitBreaker;
+    }
+
+    public static int getTotalAsyncTicks() {
+        return totalAsyncTicks.intValue();
+    }
+
+    public static int getTotalAsyncFailures() {
+        return totalAsyncFailures.intValue();
+    }
+
+    public static int getTotalTimeoutWarnings() {
+        return totalTimeoutWarnings.intValue();
+    }
+
+    public static int getLastWorkerCount() {
+        return lastWorkerCount.get();
+    }
 
     public static void setupThreadPool(int parallelism, Class<?> asyncClass) {
         isShuttingDown = false;
@@ -67,11 +102,16 @@ public class ParallelProcessor {
                 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<>(),
                 threadFactory);
-        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.DiscardPolicy());
+
+        // IMPROVED: CallerRunsPolicy instead of DiscardPolicy
+        // If pool is saturated, the caller thread (server) runs the task itself
+        // instead of silently dropping it. This is much safer.
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+
         executor.allowCoreThreadTimeOut(false);
         executor.prestartAllCoreThreads();
         tickPool = executor;
-        LOGGER.info("Initialized Pool with {} threads", parallelism);
+        LOGGER.info("Initialized Pool with {} threads (CallerRunsPolicy)", parallelism);
     }
 
     public static void registerThread(String poolName, Thread thread) {
@@ -97,55 +137,172 @@ public class ParallelProcessor {
         return 0;
     }
 
+    /**
+     * Calculate optimal worker count based on entity count and pool size.
+     * Dynamic scaling: fewer workers when few entities, full pool when many.
+     */
+    private static int calculateWorkerCount(int entityCount, int poolSize) {
+        if (poolSize <= 0) return 1;
+        int entitiesPerWorker = AsyncConfig.entitiesPerWorker.getValue();
+        if (entitiesPerWorker <= 0) entitiesPerWorker = 25;
+        int desired = (entityCount + entitiesPerWorker - 1) / entitiesPerWorker;
+        return Math.max(2, Math.min(poolSize, desired));
+    }
+
+    /**
+     * Main entity tick dispatch method.
+     * IMPROVED: Pre-splits sync/async, uses work stealing, integrates circuit breaker.
+     */
     @SuppressWarnings("unchecked")
     public static void callEntityTickBatch(ServerLevel world, List<Entity> entities) {
         if (entities.isEmpty()) return;
 
-        if (AsyncConfig.disabled.getValue() || tickPool.isShutdown()) {
+        if (AsyncConfig.disabled.getValue() || tickPool == null || tickPool.isShutdown()) {
             entities.forEach(e -> tickEntity(world, e, false));
             TickStats.RECORDING_TICKS_LEFT.decrementAndGet();
             return;
         }
 
-        int poolSize = getPoolSize();
-        int chunkSize = (entities.size() + poolSize - 1) / poolSize;
+        // IMPROVED: Pre-split entities into sync and async lists
+        // This avoids redundant classification inside each worker
+        List<Entity> syncEntities = new ArrayList<>();
+        List<Entity> asyncEntities = new ArrayList<>(entities.size());
 
-        List<Future<Void>> futures = new ArrayList<>();
-        for (int i = 0; i < entities.size(); i += chunkSize) {
-            List<Entity> chunk = entities.subList(i, Math.min(i + chunkSize, entities.size()));
-            Future<Void> future = (Future<Void>) tickPool.submit(() -> {
-                for (Entity entity : chunk) {
-                    if (!shouldTickSynchronously(entity)) {
-                        tickEntity(world, entity, true);
-                    }
-                }
-            });
-            futures.add(future);
-        }
-
-        for (Entity e : entities) {
-            if (shouldTickSynchronously(e)) {
-                tickEntity(world, e, false);
+        for (Entity entity : entities) {
+            if (shouldTickSynchronously(entity)) {
+                syncEntities.add(entity);
+            } else {
+                asyncEntities.add(entity);
             }
         }
 
+        List<Future<Void>> futures = Collections.emptyList();
+
+        if (!asyncEntities.isEmpty()) {
+            int poolSize = getPoolSize();
+            int workerCount = calculateWorkerCount(asyncEntities.size(), poolSize);
+            lastWorkerCount.set(workerCount);
+
+            if (AsyncConfig.enableAffinityRouting.getValue()) {
+                futures = dispatchWithAffinity(world, asyncEntities, workerCount);
+            } else {
+                futures = dispatchWithWorkStealing(world, asyncEntities, workerCount);
+            }
+        }
+
+        // Tick sync entities on main thread (runs concurrently with async workers)
+        for (Entity e : syncEntities) {
+            tickEntity(world, e, false);
+        }
+
+        // Wait for all async workers
         waitForFutures(futures);
         TickStats.RECORDING_TICKS_LEFT.decrementAndGet();
     }
 
+    /**
+     * IMPROVED: Work stealing with shared ConcurrentLinkedQueue.
+     * Each worker pulls entities one at a time from the shared queue.
+     * Fast workers naturally process more entities, eliminating batch imbalance.
+     */
+    private static List<Future<Void>> dispatchWithWorkStealing(
+            ServerLevel world, List<Entity> asyncEntities, int workerCount) {
+        ConcurrentLinkedQueue<Entity> workQueue = new ConcurrentLinkedQueue<>(asyncEntities);
+        List<Future<Void>> futures = new ArrayList<>(workerCount);
+
+        for (int w = 0; w < workerCount; w++) {
+            futures.add((Future<Void>) tickPool.submit(() -> {
+                Entity entity;
+                while ((entity = workQueue.poll()) != null) {
+                    tickEntity(world, entity, true);
+                }
+            }));
+        }
+
+        return futures;
+    }
+
+    /**
+     * IMPROVED: Affinity routing with work stealing fallback.
+     * Entities are routed to per-worker lanes by chunk position,
+     * giving cache locality when entities access the same chunk data.
+     * Workers drain their own lane first, then steal from others.
+     */
+    private static List<Future<Void>> dispatchWithAffinity(
+            ServerLevel world, List<Entity> asyncEntities, int workerCount) {
+        // Create per-worker lanes
+        List<ConcurrentLinkedQueue<Entity>> lanes = new ArrayList<>(workerCount);
+        for (int i = 0; i < workerCount; i++) {
+            lanes.add(new ConcurrentLinkedQueue<>());
+        }
+
+        // Route entities to lanes by chunk position (XOR hash for better distribution)
+        for (Entity entity : asyncEntities) {
+            long chunkKey = entity.chunkPosition().toLong();
+            int laneIndex = (int) (((chunkKey ^ (chunkKey >>> 32)) & 0x7FFFFFFFFFFFFFFFL) % workerCount);
+            lanes.get(laneIndex).add(entity);
+        }
+
+        List<Future<Void>> futures = new ArrayList<>(workerCount);
+
+        for (int w = 0; w < workerCount; w++) {
+            final int myLane = w;
+            futures.add((Future<Void>) tickPool.submit(() -> {
+                // Phase 1: Drain own lane first (cache locality)
+                Entity entity;
+                while ((entity = lanes.get(myLane).poll()) != null) {
+                    tickEntity(world, entity, true);
+                }
+                // Phase 2: Steal from other lanes (work stealing)
+                for (int i = 0; i < workerCount; i++) {
+                    if (i == myLane) continue;
+                    while ((entity = lanes.get(i).poll()) != null) {
+                        tickEntity(world, entity, true);
+                    }
+                }
+            }));
+        }
+
+        return futures;
+    }
+
+    /**
+     * IMPROVED: Wait for futures with stale task timeout detection.
+     * Logs warnings when ticks exceed the timeout threshold,
+     * but always waits for completion to avoid data corruption.
+     */
     private static void waitForFutures(List<Future<Void>> futures) {
+        if (futures.isEmpty()) return;
+
+        long startTime = System.nanoTime();
+        long timeoutNs = TimeUnit.MILLISECONDS.toNanos(
+                Math.max(50, AsyncConfig.staleTaskTimeoutMs.getValue()));
+        boolean timeoutWarned = false;
+
         boolean allDone;
         do {
             allDone = futures.stream().allMatch(Future::isDone);
             if (!allDone) {
+                long elapsed = System.nanoTime() - startTime;
+                if (!timeoutWarned && elapsed > timeoutNs) {
+                    timeoutWarned = true;
+                    totalTimeoutWarnings.increment();
+                    long elapsedMs = TimeUnit.NANOSECONDS.toMillis(elapsed);
+                    LOGGER.warn("Async entity tick batch exceeded {}ms timeout ({}ms elapsed), still waiting...",
+                            AsyncConfig.staleTaskTimeoutMs.getValue(), elapsedMs);
+                }
+
                 boolean pumped = false;
-                for (ServerLevel lvl : server.getAllLevels()) {
-                    pumped |= lvl.getChunkSource().pollTask();
+                if (server != null) {
+                    for (ServerLevel lvl : server.getAllLevels()) {
+                        pumped |= lvl.getChunkSource().pollTask();
+                    }
                 }
                 if (!pumped) Thread.onSpinWait();
             }
         } while (!allDone);
 
+        // Collect results and log errors
         for (Future<Void> future : futures) {
             try {
                 future.get();
@@ -171,6 +328,12 @@ public class ParallelProcessor {
                 || BLOCKED_ENTITIES.contains(entity.getClass())
                 || blacklistedEntity.contains(entityId)
                 || AsyncConfig.isEntitySynchronized(EntityType.getKey(entity.getType()))) {
+            return true;
+        }
+
+        // NEW: Circuit breaker check - if open for this entity type, tick synchronously
+        if (AsyncConfig.enableCircuitBreaker.getValue()
+                && !circuitBreaker.shouldTickAsync(entity.getType())) {
             return true;
         }
 
@@ -203,18 +366,36 @@ public class ParallelProcessor {
         return false;
     }
 
+    /**
+     * IMPROVED: tickEntity now integrates circuit breaker feedback.
+     */
     private static void tickEntity(ServerLevel world, Entity entity, boolean async) {
         long start = System.nanoTime();
         currentEntities.incrementAndGet();
+        EntityType<?> type = entity.getType();
+
         try {
             world.tickNonPassenger(entity);
+
+            if (async) {
+                totalAsyncTicks.increment();
+                if (AsyncConfig.enableCircuitBreaker.getValue()) {
+                    circuitBreaker.recordSuccess(type);
+                }
+            }
         } catch (Exception e) {
             LOGGER.error("Error during {} tick. Entity: {}, UUID: {}",
-                    async ? "async" : "sync", entity.getType(), entity.getUUID(), e);
+                    async ? "async" : "sync", type, entity.getUUID(), e);
+
+            if (async) {
+                totalAsyncFailures.increment();
+                if (AsyncConfig.enableCircuitBreaker.getValue()) {
+                    circuitBreaker.recordFailure(type, e);
+                }
+            }
         } finally {
             currentEntities.decrementAndGet();
             if (TickStats.RECORDING_TICKS_LEFT.get() > 0) {
-                EntityType<?> type = entity.getType();
                 long elapsed = System.nanoTime() - start;
 
                 if (async) {
@@ -228,8 +409,13 @@ public class ParallelProcessor {
         }
     }
 
+    /**
+     * @deprecated Per-dimension locks are now handled directly in ServerLevelMixin.
+     */
+    @Deprecated
     public static Object getEntityAddLock() {
-        return ENTITY_ADD_LOCK;
+        // Legacy fallback - should not be used anymore
+        return new Object();
     }
 
     public static void asyncSpawnForChunk(ServerLevel level, LevelChunk chunk, NaturalSpawner.SpawnState spawnState,
@@ -249,8 +435,10 @@ public class ParallelProcessor {
     }
 
     public static void postEntityTick() {
-        for (ServerLevel world : server.getAllLevels()) {
-            world.getChunkSource().pollTask();
+        if (server != null) {
+            for (ServerLevel world : server.getAllLevels()) {
+                world.getChunkSource().pollTask();
+            }
         }
     }
 
@@ -273,6 +461,11 @@ public class ParallelProcessor {
         AsyncConfig.clearCaches();
         blacklistedEntity.clear();
         portalTickSyncMap.clear();
+        circuitBreaker.reset();
+        totalAsyncTicks.reset();
+        totalAsyncFailures.reset();
+        totalTimeoutWarnings.reset();
+        lastWorkerCount.set(0);
         TickStats.resetEntityTickStats();
     }
 

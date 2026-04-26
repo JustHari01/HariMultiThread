@@ -70,7 +70,9 @@ public abstract class ServerLevelMixin
     @Unique
     private static final Object lock = new Object();
     @Unique
-    private static final Object async$explosionLock = new Object();
+    private final Object async$explosionLock = new Object();
+    @Unique
+    private final Object async$entityAddLock = new Object();
 
     protected ServerLevelMixin(WritableLevelData properties, ResourceKey<Level> registryRef,
             RegistryAccess registryManager, Holder<DimensionType> dimensionEntry, Supplier<ProfilerFiller> profiler,
@@ -192,8 +194,9 @@ public abstract class ServerLevelMixin
         if (AsyncConfig.disabled.getValue() || !AsyncConfig.enableAsyncSpawn.getValue()) {
             return original.call(entity);
         }
-        Object object = ParallelProcessor.getEntityAddLock();
-        synchronized (object) {
+        // IMPROVED: Per-dimension lock instead of global lock.
+        // Entities spawning in different dimensions no longer block each other.
+        synchronized (this.async$entityAddLock) {
             return original.call(entity);
         }
     }
