@@ -1,0 +1,185 @@
+/**
+ * collision_broadphase.comp
+ *
+ * Vulkan GLSL 450 compute shader for broad-phase AABB collision detection.
+ *
+ * Uses a tile-based approach: entities are loaded into shared memory in tiles
+ * of 64 (matching the workgroup size) so that each entity's data is fetched
+ * from global memory only once per tile, reducing VRAM bandwidth usage.
+ *
+ * Overlap test (axis-aligned bounding boxes):
+ *   |x1 - x2| < (hw1 + hw2)   (X axis)
+ *   |z1 - z2| < (hw1 + hw2)   (Z axis)
+ *   |y1 - y2| < (h1  + h2 )   (Y axis)
+ *
+ * An optional squared-range pre-filter can reject distant pairs early before
+ * the full AABB check.
+ */
+
+#version 450
+
+// Each workgroup processes 64 entities at a time (one tile).
+layout(local_size_x = 64) in;
+
+// ---------------------------------------------------------------------------
+// Push constants (28 bytes)
+// ---------------------------------------------------------------------------
+layout(push_constant) uniform PushConstants
+{
+    int   entityCount;   // Total number of entities to test
+    int   maxPairs;      // Maximum collision pairs the output buffers hold
+    float rangeLimitSq;  // Squared range limit (0.0 = unlimited)
+    int   _padding;      // Explicit padding to reach 28 bytes
+};
+
+// ---------------------------------------------------------------------------
+// Input SSBOs (read-only) -- one component per entity, SoA layout
+// ---------------------------------------------------------------------------
+layout(std430, binding = 0) readonly buffer PosX     { float posX[]; };
+layout(std430, binding = 1) readonly buffer PosY     { float posY[]; };
+layout(std430, binding = 2) readonly buffer PosZ     { float posZ[]; };
+layout(std430, binding = 3) readonly buffer HalfW    { float halfWidths[]; };
+layout(std430, binding = 4) readonly buffer Heights  { float heights[]; };
+layout(std430, binding = 5) readonly buffer Flags    { int   entityFlags[]; };
+
+// ---------------------------------------------------------------------------
+// Output SSBOs
+// ---------------------------------------------------------------------------
+layout(std430, binding = 6) writeonly buffer PairsA      { int pairsA[]; };
+layout(std430, binding = 7) writeonly buffer PairsB      { int pairsB[]; };
+layout(std430, binding = 8) coherent     buffer PairCount { int pairCounter; };
+
+// ---------------------------------------------------------------------------
+// Shared memory -- one tile of entity data for the current workgroup
+// ---------------------------------------------------------------------------
+shared float shPosX     [64];
+shared float shPosY     [64];
+shared float shPosZ     [64];
+shared float shHalfW    [64];
+shared float shHeight   [64];
+shared int   shFlags    [64];
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+void main()
+{
+    // Global thread ID -- each thread owns one entity.
+    uint gid = gl_GlobalInvocationID.x;
+
+    // Early-out if this thread has no entity to process.
+    if (gid >= uint(entityCount))
+    {
+        return;
+    }
+
+    // Load this thread's entity data into registers (constant across tiles).
+    float myX  = posX[gid];
+    float myY  = posY[gid];
+    float myZ  = posZ[gid];
+    float myHW = halfWidths[gid];
+    float myH  = heights[gid];
+    int   myFlags = entityFlags[gid];
+
+    // Number of tiles needed to cover all entities.
+    uint tileCount = (uint(entityCount) + 63u) / 64u;
+
+    // Iterate over tiles.  Each tile loads 64 entities into shared memory so
+    // that every thread can test its own entity against the whole tile without
+    // hitting global memory more than once per tile.
+    for (uint tile = 0u; tile < tileCount; tile++)
+    {
+        // ------------------------------------------------------------------
+        // Cooperative load: each thread loads one element into shared memory.
+        // ------------------------------------------------------------------
+        uint localIdx = gl_LocalInvocationID.x;
+        uint entityId = tile * 64u + localIdx;
+
+        if (entityId < uint(entityCount))
+        {
+            shPosX   [localIdx] = posX[entityId];
+            shPosY   [localIdx] = posY[entityId];
+            shPosZ   [localIdx] = posZ[entityId];
+            shHalfW  [localIdx] = halfWidths[entityId];
+            shHeight [localIdx] = heights[entityId];
+            shFlags  [localIdx] = entityFlags[entityId];
+        }
+
+        // Synchronize so all shared data is visible before testing.
+        barrier();
+
+        // ------------------------------------------------------------------
+        // Test this thread's entity against every entity in the current tile.
+        // ------------------------------------------------------------------
+        uint tileElemCount = min(64u, uint(entityCount) - tile * 64u);
+
+        for (uint j = 0u; j < tileElemCount; j++)
+        {
+            // Linear index of the candidate entity.
+            uint jId = tile * 64u + j;
+
+            // Skip self-comparison.
+            if (gid == jId)
+            {
+                continue;
+            }
+
+            // Avoid duplicate pairs: only record when i < j.
+            if (gid > jId)
+            {
+                continue;
+            }
+
+            // ----------------------------------------------------------
+            // Optional squared-range pre-filter.
+            // When rangeLimitSq > 0, reject pairs whose centres are
+            // already too far apart before computing the full AABB test.
+            // ----------------------------------------------------------
+            if (rangeLimitSq > 0.0)
+            {
+                float dx = myX - shPosX[j];
+                float dy = myY - shPosY[j];
+                float dz = myZ - shPosZ[j];
+                float distSq = dx * dx + dy * dy + dz * dz;
+
+                if (distSq > rangeLimitSq)
+                {
+                    continue;
+                }
+            }
+
+            // ----------------------------------------------------------
+            // AABB overlap test.
+            //   X axis: |x1 - x2| < (hw1 + hw2)
+            //   Z axis: |z1 - z2| < (hw1 + hw2)
+            //   Y axis: |y1 - y2| < (h1  + h2 )
+            // ----------------------------------------------------------
+            float dxAbs = abs(myX - shPosX[j]);
+            float dzAbs = abs(myZ - shPosZ[j]);
+            float dyAbs = abs(myY - shPosY[j]);
+
+            float extentXZ = myHW + shHalfW[j];
+            float extentY  = myH  + shHeight[j];
+
+            bool overlaps = (dxAbs < extentXZ)
+                         && (dzAbs < extentXZ)
+                         && (dyAbs < extentY);
+
+            if (overlaps)
+            {
+                // Atomically claim a slot in the output buffers.
+                int slot = atomicAdd(pairCounter, 1);
+
+                // Guard against overflowing the output buffers.
+                if (slot < maxPairs)
+                {
+                    pairsA[slot] = int(gid);
+                    pairsB[slot] = int(jId);
+                }
+            }
+        }
+
+        // Synchronize again before the next tile overwrites shared memory.
+        barrier();
+    }
+}

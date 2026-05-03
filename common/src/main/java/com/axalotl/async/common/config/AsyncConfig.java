@@ -30,6 +30,7 @@ public class AsyncConfig {
     public static Map.Entry<String, Boolean> enableAsyncRandomTicks = new AbstractMap.SimpleEntry<String, Boolean>("enableAsyncRandomTicks", false);
     public static Map.Entry<String, Boolean> enableAffinityRouting = new AbstractMap.SimpleEntry<String, Boolean>("enableAffinityRouting", true);
     public static Map.Entry<String, Boolean> enableCircuitBreaker = new AbstractMap.SimpleEntry<String, Boolean>("enableCircuitBreaker", true);
+    public static Map.Entry<String, Boolean> enableGpuCollision = new AbstractMap.SimpleEntry<String, Boolean>("enableGpuCollision", true);
     public static Map.Entry<String, Integer> entitiesPerWorker = new AbstractMap.SimpleEntry<String, Integer>("entitiesPerWorker", 25);
     public static Map.Entry<String, Integer> staleTaskTimeoutMs = new AbstractMap.SimpleEntry<String, Integer>("staleTaskTimeoutMs", 200);
     public static Map.Entry<String, Set<String>> synchronizedEntities = new AbstractMap.SimpleEntry<String, Set<String>>("synchronizedEntities", AsyncConfig.getDefaultSynchronizedEntities());

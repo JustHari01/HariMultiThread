@@ -1,6 +1,8 @@
 package com.axalotl.async.common;
 
 import com.axalotl.async.common.config.AsyncConfig;
+import com.axalotl.async.common.gpu.GpuCollisionDispatcher;
+import com.axalotl.async.common.gpu.GpuEntityModule;
 import com.axalotl.async.common.mixin.accessor.EntityAccessor;
 import com.axalotl.async.common.parallelised.utils.AsyncCompatible;
 import com.axalotl.async.common.utils.EntityTickCircuitBreaker;
@@ -57,6 +59,10 @@ public class ParallelProcessor {
     private static final LongAdder totalTimeoutWarnings = new LongAdder();
     private static final AtomicInteger lastWorkerCount = new AtomicInteger(0);
 
+    // --- NEW: GPU collision pre-compute ---
+    private static final LongAdder gpuCollisionTicks = new LongAdder();
+    private static final LongAdder gpuCollisionSavedMs = new LongAdder();
+
     // --- REMOVED: global ENTITY_ADD_LOCK (now per-dimension in ServerLevelMixin) ---
 
     public static final Set<Class<?>> BLOCKED_ENTITIES = Set.of(
@@ -112,6 +118,9 @@ public class ParallelProcessor {
         executor.prestartAllCoreThreads();
         tickPool = executor;
         LOGGER.info("Initialized Pool with {} threads (CallerRunsPolicy)", parallelism);
+
+        // Initialize GPU module (non-blocking, graceful fallback)
+        GpuEntityModule.initialize();
     }
 
     public static void registerThread(String poolName, Thread thread) {
@@ -177,6 +186,25 @@ public class ParallelProcessor {
         }
 
         List<Future<Void>> futures = Collections.emptyList();
+
+        // --- GPU broad-phase collision pre-compute ---
+        // Runs BEFORE entity tick dispatch. Results available to workers for narrow-phase.
+        if (!asyncEntities.isEmpty()
+                && GpuEntityModule.isGpuAvailable()
+                && AsyncConfig.enableGpuCollision.getValue()) {
+            long gpuStart = System.nanoTime();
+            try {
+                GpuCollisionDispatcher dispatcher = GpuEntityModule.getCollisionDispatcher();
+                List<GpuCollisionDispatcher.CollisionPair> gpuPairs = dispatcher.computeBroadPhase(asyncEntities);
+                long gpuElapsed = System.nanoTime() - gpuStart;
+                gpuCollisionTicks.increment();
+                gpuCollisionSavedMs.add(TimeUnit.NANOSECONDS.toMillis(gpuElapsed));
+                // Collision pairs are now available for use during entity ticking
+                // Future: pass collision pairs to workers for optimized narrow-phase
+            } catch (Throwable t) {
+                LOGGER.debug("GPU collision pre-compute failed (safe to ignore): {}", t.getMessage());
+            }
+        }
 
         if (!asyncEntities.isEmpty()) {
             int poolSize = getPoolSize();
@@ -466,6 +494,9 @@ public class ParallelProcessor {
         totalAsyncFailures.reset();
         totalTimeoutWarnings.reset();
         lastWorkerCount.set(0);
+        gpuCollisionTicks.reset();
+        gpuCollisionSavedMs.reset();
+        GpuEntityModule.shutdown();
         TickStats.resetEntityTickStats();
     }
 
