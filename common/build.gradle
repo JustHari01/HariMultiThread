@@ -38,10 +38,11 @@ dependencies {
     // 5. Optional: Harium for navigation integration
     compileOnly files("libs/Harium-1.0.0.jar")
 
-    // 6. GPU: LWJGL Vulkan (optional — graceful fallback if absent)
-    // LWJGL Vulkan uses system's Vulkan driver (vulkan-1.dll / libvulkan.so.1), no separate natives
-    compileOnly "org.lwjgl:lwjgl-vulkan:3.3.1"
-    compileOnly "org.lwjgl:lwjgl:3.3.1"
+    // 6. GPU: LWJGL Vulkan — must be implementation so classes are available at runtime.
+    // Forge ships LWJGL 3.3.1 core but NOT the Vulkan module.
+    // No separate natives needed — LWJGL Vulkan binds to system's vulkan-1.dll / libvulkan.so.1.
+    implementation "org.lwjgl:lwjgl-vulkan:3.3.1"
+    implementation "org.lwjgl:lwjgl:3.3.1"
 }
 
 // Configuration for sharing source/resources with loader-specific projects

@@ -166,30 +166,116 @@ public final class VkDeviceManager {
     // =====================================================================
 
     private static boolean findAndLoadVulkanLibrary() {
+        String existing = System.getProperty("org.lwjgl.vulkan.library.name");
+        if (existing != null && !existing.isEmpty()) {
+            LOGGER.debug("Vulkan library name already set: {}", existing);
+            return true;
+        }
+
         try {
             Class.forName("org.lwjgl.vulkan.VK10");
-            return true; // LWJGL Vulkan already loadable
+            return true;
         } catch (ClassNotFoundException ignored) { }
 
         String os = System.getProperty("os.name", "").toLowerCase();
-        String libName;
-        if (os.contains("win")) libName = "vulkan-1.dll";
-        else if (os.contains("linux")) libName = "libvulkan.so.1";
-        else if (os.contains("mac")) libName = "libvulkan.1.dylib";
-        else return false;
+        File vulkanLib;
+        String pathSep;
 
-        for (String base : new String[]{ System.getenv("VULKAN_SDK"), System.getenv("VK_SDK_PATH"), "C:/VulkanSDK" }) {
-            if (base == null || base.isEmpty()) continue;
-            File found = searchForFile(base, libName);
-            if (found != null) {
-                System.setProperty("org.lwjgl.vulkan.library.name", found.getAbsolutePath());
-                LOGGER.debug("Using Vulkan library at {}", found.getAbsolutePath());
-                return true;
+        if (os.contains("win")) {
+            pathSep = ";";
+            vulkanLib = findVulkanWindows();
+        } else if (os.contains("mac") || os.contains("darwin")) {
+            return false;
+        } else {
+            pathSep = ":";
+            vulkanLib = findVulkanLinux();
+        }
+
+        if (vulkanLib == null || !vulkanLib.exists()) {
+            LOGGER.info("Vulkan native library not found — GPU collision stays CPU-only");
+            return false;
+        }
+
+        String vulkanPath = vulkanLib.getAbsolutePath();
+        System.setProperty("org.lwjgl.vulkan.library.name", vulkanPath);
+
+        String vulkanDir = vulkanLib.getParent();
+        if (vulkanDir != null) {
+            String lwjglPath = System.getProperty("org.lwjgl.librarypath", "");
+            if (!lwjglPath.contains(vulkanDir)) {
+                System.setProperty("org.lwjgl.librarypath",
+                        lwjglPath.isEmpty() ? vulkanDir : lwjglPath + pathSep + vulkanDir);
             }
         }
-        // Let LWJGL try default lookup
-        try { Class.forName("org.lwjgl.vulkan.VK10"); return true; } catch (Throwable ignored) { }
-        return false;
+
+        LOGGER.info("Vulkan native library found: {}", vulkanPath);
+        return true;
+    }
+
+    private static File findVulkanWindows() {
+        // 1. System32 — where GPU drivers install vulkan-1.dll
+        String systemRoot = System.getenv("SystemRoot");
+        if (systemRoot == null) systemRoot = "C:\\Windows";
+        File system32 = new File(systemRoot + "\\System32", "vulkan-1.dll");
+        if (system32.exists()) return system32;
+
+        // 2. VULKAN_SDK env
+        String sdk = System.getenv("VULKAN_SDK");
+        if (sdk != null && !sdk.isEmpty()) {
+            File rt = new File(sdk, "Runtime\\vulkan-1.dll");
+            if (rt.exists()) return rt;
+            File rt2 = new File(sdk, "vulkan-1.dll");
+            if (rt2.exists()) return rt2;
+        }
+
+        // 3. Program Files/VulkanSDK (installed SDK)
+        String pf = System.getenv("ProgramFiles");
+        if (pf == null) pf = "C:\\Program Files";
+        File pfSdk = new File(pf, "VulkanSDK");
+        if (pfSdk.isDirectory()) {
+            File[] versions = pfSdk.listFiles(File::isDirectory);
+            if (versions != null && versions.length > 0) {
+                java.util.Arrays.sort(versions, java.util.Comparator.comparing(File::getName).reversed());
+                for (File v : versions) {
+                    File rt = new File(v, "Runtime\\vulkan-1.dll");
+                    if (rt.exists()) return rt;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static File findVulkanLinux() {
+        String[] paths = {
+                "/usr/lib/x86_64-linux-gnu/libvulkan.so.1",
+                "/usr/lib/libvulkan.so.1",
+                "/usr/lib64/libvulkan.so.1",
+                "/usr/local/lib/libvulkan.so.1",
+                "/usr/lib/aarch64-linux-gnu/libvulkan.so.1",
+        };
+        for (String p : paths) {
+            File f = new File(p);
+            if (f.exists()) return f;
+        }
+
+        String ldPath = System.getenv("LD_LIBRARY_PATH");
+        if (ldPath != null) {
+            for (String dir : ldPath.split(":")) {
+                if (!dir.isEmpty()) {
+                    File f = new File(dir, "libvulkan.so.1");
+                    if (f.exists()) return f;
+                }
+            }
+        }
+
+        String sdk = System.getenv("VULKAN_SDK");
+        if (sdk != null && !sdk.isEmpty()) {
+            File f = new File(sdk + "/lib/libvulkan.so.1");
+            if (f.exists()) return f;
+        }
+
+        return null;
     }
 
     private static Object createInstance() throws Exception {
